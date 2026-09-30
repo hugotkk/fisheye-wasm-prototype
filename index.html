@@ -1,0 +1,111 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<title>Fisheye -> Equirect (WebGL prototype)</title>
+<style>
+body{font:14px sans-serif;max-width:900px;margin:20px auto;padding:0 12px}
+canvas{max-width:100%;border:1px solid #ccc;background:#111}
+label{display:inline-block;min-width:110px}
+.row{margin:6px 0}
+#log{white-space:pre-wrap;background:#f4f4f4;padding:8px;font:12px monospace;max-height:200px;overflow:auto}
+#status{font-weight:bold}
+</style></head>
+<body>
+<h2>Dual-fisheye -&gt; equirectangular (client-side WebGL prototype)</h2>
+<p>Prototype for <a href="https://github.com/hugotkk/fisheye-image-converter">fisheye-image-converter</a>:
+ports <code>build_panorama()</code> from <code>insp2pano.py</code> to a GLSL fragment shader so the
+reprojection runs in the browser instead of server-side numpy/opencv.</p>
+
+<div class="row"><label>Input file</label><input type="file" id="file" accept="image/jpeg,.insp"></div>
+<div class="row"><label>Output width</label><input type="number" id="width" value="3000" step="100"></div>
+<div class="row"><label>FOV (deg)</label><input type="number" id="fov" value="200"></div>
+<div class="row"><label>Blend (deg)</label><input type="number" id="blend" value="6"></div>
+<div class="row"><label>Roll (deg)</label><input type="number" id="roll" value="-90"></div>
+<div class="row"><label>Swap lenses</label><input type="checkbox" id="swap"></div>
+<div class="row"><label>Quality</label><input type="number" id="quality" value="92" min="1" max="100"></div>
+<div class="row"><button id="go">Convert</button> <span id="status"></span></div>
+
+<canvas id="preview"></canvas>
+<div class="row"><a id="download" download="panorama_360.jpg">Download JPEG</a></div>
+<h3>Log</h3>
+<div id="log"></div>
+
+<script src="gl-pano.js"></script>
+<script src="xmp.js"></script>
+<script>
+const logEl = document.getElementById('log');
+const statusEl = document.getElementById('status');
+function log(...args) {
+  const line = args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' ');
+  logEl.textContent += line + '\n';
+  logEl.scrollTop = logEl.scrollHeight;
+  console.log(...args);
+}
+
+(function reportCaps() {
+  const c = document.createElement('canvas');
+  const gl2 = c.getContext('webgl2');
+  const gl1 = !gl2 && (c.getContext('webgl') || c.getContext('experimental-webgl'));
+  const gl = gl2 || gl1;
+  log('WebGL2 available:', !!gl2, gl1 ? '(webgl1 fallback available)' : '');
+  if (gl) log('MAX_TEXTURE_SIZE:', gl.getParameter(gl.MAX_TEXTURE_SIZE));
+  if (performance.memory) {
+    log('JS heap limit (MB):', Math.round(performance.memory.jsHeapSizeLimit / 1e6));
+  }
+})();
+
+document.getElementById('go').onclick = async () => {
+  const fileInput = document.getElementById('file');
+  if (!fileInput.files[0]) { alert('choose a file'); return; }
+  statusEl.textContent = 'loading image...';
+  const file = fileInput.files[0];
+  const buf = new Uint8Array(await file.arrayBuffer());
+  const soi = buf.findIndex((b, i) => b === 0xff && buf[i + 1] === 0xd8);
+  const jpegBytes = soi > 0 ? buf.subarray(soi) : buf;
+  const blob = new Blob([jpegBytes], { type: 'image/jpeg' });
+  const url = URL.createObjectURL(blob);
+  const img = new Image();
+  await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url; });
+  URL.revokeObjectURL(url);
+  log('decoded image', img.width, 'x', img.height);
+
+  const outW = parseInt(document.getElementById('width').value, 10);
+  const opts = {
+    imgW: img.width, imgH: img.height,
+    outW, outH: outW / 2,
+    fov: parseFloat(document.getElementById('fov').value),
+    blend: parseFloat(document.getElementById('blend').value),
+    radiusScale: 1.0,
+    frontCenter: [0, 0], backCenter: [0, 0],
+    swap: document.getElementById('swap').checked,
+    yaw: 0, pitch: 0, roll: parseFloat(document.getElementById('roll').value),
+  };
+  log('opts', opts);
+
+  statusEl.textContent = 'reprojecting...';
+  const t0 = performance.now();
+  const result = renderPanorama(img, opts, p => { statusEl.textContent = `reprojecting... ${Math.round(p * 100)}%`; });
+  const t1 = performance.now();
+  log('backend:', result.backend, result.fallbackFrom ? `(fallback from: ${result.fallbackFrom})` : '');
+  log('reprojection time (ms):', Math.round(t1 - t0));
+  if (performance.memory) {
+    log('JS heap used (MB):', Math.round(performance.memory.usedJSHeapSize / 1e6));
+  }
+
+  const preview = document.getElementById('preview');
+  preview.width = result.canvas.width; preview.height = result.canvas.height;
+  preview.getContext('2d').drawImage(result.canvas, 0, 0);
+
+  statusEl.textContent = 'encoding JPEG...';
+  const quality = parseInt(document.getElementById('quality').value, 10) / 100;
+  const jpegBlob = await new Promise(res => result.canvas.toBlob(res, 'image/jpeg', quality));
+  log('encoded JPEG bytes:', jpegBlob.size);
+  const withXmp = await embedGpanoXmp(jpegBlob, opts.outW, opts.outH);
+  const dlUrl = URL.createObjectURL(withXmp);
+  const a = document.getElementById('download');
+  a.href = dlUrl;
+  const t2 = performance.now();
+  log('total time (ms):', Math.round(t2 - t0));
+  statusEl.textContent = `done (${result.backend}, ${Math.round(t2 - t0)}ms)`;
+};
+</script>
+</body></html>
